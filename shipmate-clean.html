@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ShipMate - FBA Shipment Planner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+        iframe { border: none; width: 100%; height: calc(100vh - 80px); }
+    </style>
+    <script>
+        // Prevent direct access - must be loaded in iframe from SSO portal
+        if (window.self === window.top) {
+            document.body.innerHTML = '<h2 style="text-align:center;margin-top:50px;">Bu sayfaya doğrudan erişilemez. Lütfen ShipMate üzerinden giriş yapın.</h2>';
+            setTimeout(function() {
+                window.location.href = 'https://apps.iwa.web.tr';
+            }, 2000);
+        }
+    </script>
+</head>
+<body class="bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
+    <script>
+        const SSO_PORTAL_URL = 'https://apps.iwa.web.tr';
+        const SSO_VERIFY_URL = 'https://apps.iwa.web.tr/api/auth/verify';
+        const APP_CODE = 'shipmate';
+
+        function getToken() {
+            const hash = new URLSearchParams(window.location.hash.substring(1));
+            const query = new URLSearchParams(window.location.search);
+            return hash.get('token') || query.get('token') || localStorage.getItem('sso_access_token');
+        }
+
+        async function verifyToken(token) {
+            try {
+                const res = await fetch(SSO_VERIFY_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token, app_code: APP_CODE })
+                });
+
+                // If 403, token is valid but app permission missing - need new token
+                if (res.status === 403) {
+                        localStorage.removeItem('sso_access_token');
+                    top.location.href = SSO_PORTAL_URL;
+                    return false;
+                }
+
+                const data = await res.json();
+                return data.success;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        async function init() {
+            const token = getToken();
+
+            if (!token) {
+                localStorage.removeItem('sso_access_token');
+                top.location.href = SSO_PORTAL_URL;
+                return;
+            }
+
+            const isValid = await verifyToken(token);
+
+            if (!isValid) {
+                localStorage.removeItem('sso_access_token');
+                top.location.href = SSO_PORTAL_URL;
+                return;
+            }
+
+            localStorage.setItem('sso_access_token', token);
+            window.history.replaceState({}, '', window.location.pathname);
+
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('app').style.display = 'block';
+        }
+
+        function logout() {
+            localStorage.removeItem('sso_access_token');
+            top.location.href = SSO_PORTAL_URL;
+        }
+
+        window.addEventListener('DOMContentLoaded', init);
+    </script>
+
+    <!-- Loading -->
+    <div id="loading" class="flex items-center justify-center min-h-screen">
+        <div class="text-center">
+            <div class="inline-block animate-spin rounded-full h-12 w-12 border-4 border-purple-500 border-t-transparent mb-4"></div>
+            <p class="text-white">Authenticating...</p>
+        </div>
+    </div>
+
+    <!-- App -->
+    <div id="app" style="display: none;">
+        <!-- Header -->
+        <header class="bg-black/30 backdrop-blur border-b border-white/10">
+            <div class="max-w-screen-2xl mx-auto px-6 py-4 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-lg flex items-center justify-center">
+                        <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                        </svg>
+                    </div>
+                    <div>
+                        <h1 class="text-lg font-bold text-white">ShipMate</h1>
+                        <p class="text-xs text-cyan-300">FBA Shipment Planner</p>
+                    </div>
+                </div>
+                <button onclick="logout()" class="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg text-sm font-medium transition">
+                    Logout
+                </button>
+            </div>
+        </header>
+
+        <!-- Content -->
+        <iframe src="fba-tool.html"></iframe>
+    </div>
+</body>
+</html>
