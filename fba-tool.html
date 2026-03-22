@@ -420,7 +420,6 @@
                 const missingFnskus = new Set();
                 const skippedBoxes = [];
                 const duplicateKoliNos = [];
-                const previouslySentBoxes = [];
                 const seenKoliNos = {};
                 let totalBoxesInGemi = gemiData.length;
                 let totalUnitsInGemi = 0;
@@ -433,21 +432,18 @@
                     } else {
                         seenKoliNos[koliNo] = idx + 2;
                     }
-                    // Check if this box was previously sent
-                    if (sentBoxNosMap[koliNo]) {
-                        previouslySentBoxes.push({
-                            koli_no: koliNo,
-                            row: idx + 2,
-                            sku: sentBoxNosMap[koliNo].sku,
-                            date: sentBoxNosMap[koliNo].date
-                        });
-                    }
                 });
 
                 gemiData.forEach((box, idx) => {
                     const koliNo = box.koli_no || box.box_no || ('Row-' + (idx + 2));
                     const fnsku = (box.fnsku || '').trim();
                     const qty = parseInt(box.quantity) || 0;
+
+                    // Skip previously sent boxes
+                    if (sentBoxNosMap[koliNo]) {
+                        skippedBoxes.push({ koli_no: koliNo, reason: 'Previously sent (' + (sentBoxNosMap[koliNo].date || '') + ')', fnsku: fnsku || '-' });
+                        return;
+                    }
 
                     totalUnitsInGemi += qty;
 
@@ -593,7 +589,6 @@
                     missingFnskus: Array.from(missingFnskus),
                     skippedBoxes,
                     duplicateKoliNos,
-                    previouslySentBoxes
                 };
             };
 
@@ -1170,37 +1165,6 @@
                             )
                         ),
 
-                        // Previously Sent Boxes Warning
-                        result.previouslySentBoxes && result.previouslySentBoxes.length > 0 && h('div', { className: 'mb-6 p-4 rounded-lg bg-orange-50 border-2 border-orange-500' },
-                            h('h3', { className: 'font-bold text-lg mb-3 text-orange-800' },
-                                '⚠️ WARNING: Previously Sent Boxes (' + result.previouslySentBoxes.length + ' found)'
-                            ),
-                            h('div', { className: 'bg-white rounded border max-h-48 overflow-y-auto' },
-                                h('table', { className: 'w-full text-sm' },
-                                    h('thead', { className: 'bg-orange-100 sticky top-0' },
-                                        h('tr', null,
-                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Box No'),
-                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Row'),
-                                            h('th', { className: 'text-left p-2 font-semibold' }, 'SKU'),
-                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Previously Sent')
-                                        )
-                                    ),
-                                    h('tbody', null,
-                                        result.previouslySentBoxes.map((box, idx) =>
-                                            h('tr', { key: idx, className: idx % 2 === 0 ? 'bg-white' : 'bg-orange-50' },
-                                                h('td', { className: 'p-2 font-mono font-semibold text-orange-700' }, box.koli_no),
-                                                h('td', { className: 'p-2' }, box.row),
-                                                h('td', { className: 'p-2 font-mono text-blue-600' }, box.sku || '-'),
-                                                h('td', { className: 'p-2 text-gray-600' }, box.date || '-')
-                                            )
-                                        )
-                                    )
-                                )
-                            ),
-                            h('p', { className: 'text-sm text-orange-700 mt-3 font-semibold' },
-                                'These boxes were already sent before! They may cause duplicates in Amazon inventory.'
-                            )
-                        ),
 
                         // Missing FNSKUs - Quick Add
                         result.missingFnskus && result.missingFnskus.length > 0 && h('div', { className: 'mb-6 p-4 rounded-lg bg-yellow-50 border-2 border-yellow-500' },
