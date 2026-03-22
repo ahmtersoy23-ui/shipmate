@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Amazon FBA Template Generator v18</title>
+    <title>Amazon FBA Template Generator v19</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -64,6 +64,10 @@
             // Step 1 checkbox state - SKU selections per category
             const [selectedSkus, setSelectedSkus] = useState({});
             const [step1Completed, setStep1Completed] = useState({});
+
+            // Ineligible batch split state
+            const [batchSize, setBatchSize] = useState(10);
+            const [splitEnabled, setSplitEnabled] = useState({});
 
             // Load reference DB and sent boxes from API on mount
             useEffect(() => {
@@ -504,6 +508,17 @@
                 Object.values(skuGroups).forEach(group => {
                     const isStandard = (group.tier || '').toLowerCase() === 'standard';
 
+                    // Skip SKUs with <5 total units — can't use Amazon-optimized routing
+                    const totalGroupUnits = group.boxes.reduce((sum, box) => sum + box.quantity, 0);
+                    if (totalGroupUnits < 5) {
+                        skippedBoxes.push(...group.boxes.map(box => ({
+                            koli_no: box.koli_no,
+                            reason: 'SKU total <5 units (' + totalGroupUnits + ')',
+                            fnsku: group.fnsku
+                        })));
+                        return;
+                    }
+
                     // Group boxes by quantity
                     const qtyGroups = {};
                     group.boxes.forEach(box => {
@@ -590,6 +605,58 @@
                     skippedBoxes,
                     duplicateKoliNos,
                 };
+            };
+
+            // ==================== BATCH SPLIT HELPER ====================
+
+            const splitIntoBatches = (items, batchSize) => {
+                // Sort items by box count descending (pack big SKUs first)
+                const sorted = [...items].sort((a, b) => b.boxCount - a.boxCount);
+
+                // Pack whole SKU groups into batches (never split a SKU across batches)
+                const batches = [];
+                let currentBatch = [];
+                let currentBoxCount = 0;
+
+                sorted.forEach(item => {
+                    // If adding this SKU would exceed batch size AND batch is not empty, start new batch
+                    if (currentBoxCount > 0 && currentBoxCount + item.boxCount > batchSize) {
+                        batches.push(currentBatch);
+                        currentBatch = [];
+                        currentBoxCount = 0;
+                    }
+                    currentBatch.push({
+                        ...item,
+                        quantityValue: item.boxes.length > 0 ? Math.round(item.totalQty / item.boxCount) : 0
+                    });
+                    currentBoxCount += item.boxCount;
+                });
+
+                if (currentBatch.length > 0) {
+                    batches.push(currentBatch);
+                }
+
+                // If last batch has fewer boxes than half of batchSize, redistribute to others
+                if (batches.length > 1) {
+                    const lastBatch = batches[batches.length - 1];
+                    const lastBoxCount = lastBatch.reduce((sum, item) => sum + item.boxCount, 0);
+                    if (lastBoxCount < batchSize / 2) {
+                        batches.pop();
+                        // Distribute last batch items across remaining batches (round-robin by least boxes)
+                        lastBatch.forEach(item => {
+                            // Find batch with fewest boxes
+                            let minIdx = 0;
+                            let minBoxes = Infinity;
+                            batches.forEach((b, i) => {
+                                const bc = b.reduce((s, it) => s + it.boxCount, 0);
+                                if (bc < minBoxes) { minBoxes = bc; minIdx = i; }
+                            });
+                            batches[minIdx].push(item);
+                        });
+                    }
+                }
+
+                return batches;
             };
 
             // ==================== STEP 1 & 2 FUNCTIONS ====================
@@ -802,7 +869,7 @@
                 h('div', { className: 'bg-white rounded-2xl shadow-2xl p-6 mb-6' },
                     h('h1', {
                         className: 'text-3xl font-bold text-center bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent'
-                    }, 'Amazon FBA Template Generator v18')
+                    }, 'Amazon FBA Template Generator v19')
                 ),
 
                 // ==================== DB STATUS BANNER ====================
@@ -1225,143 +1292,215 @@
                             { key: 'standardPffIneligible', title: 'Standard PFF Ineligible', color: 'border-red-500', pack: 2 },
                             { key: 'oversizePffEligible', title: 'Oversize PFF Eligible', color: 'border-green-500', pack: 3 },
                             { key: 'oversizePffIneligible', title: 'Oversize PFF Ineligible', color: 'border-red-500', pack: 4 }
-                        ].map(cat => {
+                        ].flatMap(cat => {
                             const items = result.categories[cat.key];
-                            if (items.length === 0) return null;
+                            if (items.length === 0) return [];
 
-                            const isStep1Done = step1Completed[cat.key];
-                            const selectedItems = getSelectedItems(cat.key);
-                            const selectedCount = selectedItems.length;
+                            const isIneligible = cat.key.includes('Ineligible');
+                            const isSplit = isIneligible && splitEnabled[cat.key];
+                            const totalBoxCount = items.reduce((sum, item) => sum + item.boxCount, 0);
 
-                            return h('div', { key: cat.key, className: 'bg-white rounded-xl shadow-lg p-6 border-l-4 ' + cat.color },
-                                h('div', { className: 'flex justify-between items-center mb-4' },
-                                    h('h3', { className: 'font-bold text-xl' }, cat.title),
-                                    h('span', { className: 'text-sm text-gray-500' },
-                                        items.length + ' SKU, ' + items.reduce((sum, item) => sum + item.boxCount, 0) + ' boxes'
-                                    )
-                                ),
+                            // Build list of card groups: either 1 card (normal) or N batch cards (split)
+                            const cardGroups = [];
 
-                                // STEP 1 Section
-                                h('div', { className: 'mb-4 p-4 bg-blue-50 rounded-lg' },
-                                    h('h4', { className: 'font-semibold mb-3 text-blue-800' }, 'STEP 1 - List to Send to Amazon'),
+                            if (isSplit) {
+                                const batches = splitIntoBatches(items, batchSize);
+                                batches.forEach((batchItems, bIdx) => {
+                                    cardGroups.push({
+                                        cardKey: cat.key + '-batch-' + bIdx,
+                                        title: cat.title + ' — Batch ' + (bIdx + 1) + '/' + batches.length,
+                                        items: batchItems,
+                                        pack: cat.pack,
+                                        batchLabel: 'B' + (bIdx + 1)
+                                    });
+                                });
+                            } else {
+                                cardGroups.push({
+                                    cardKey: cat.key,
+                                    title: cat.title,
+                                    items: items,
+                                    pack: cat.pack,
+                                    batchLabel: null
+                                });
+                            }
 
-                                    // Step 1 Table (sorted)
-                                    h('div', { className: 'bg-white rounded border mb-3 max-h-48 overflow-y-auto' },
-                                        h('table', { className: 'w-full text-sm' },
-                                            h('thead', { className: 'bg-gray-100 sticky top-0' },
-                                                h('tr', null,
-                                                    h('th', { className: 'text-left p-2 font-semibold' }, 'Merchant SKU'),
-                                                    h('th', { className: 'text-right p-2 font-semibold' }, 'Quantity')
+                            // Ineligible split control panel + cards
+                            const elements = [];
+
+                            if (isIneligible) {
+                                elements.push(
+                                    h('div', { key: cat.key + '-split-panel', className: 'bg-amber-50 border border-amber-300 rounded-xl p-4' },
+                                        h('div', { className: 'flex items-center justify-between flex-wrap gap-3' },
+                                            h('div', { className: 'flex-1 min-w-0' },
+                                                h('p', { className: 'text-sm text-amber-800 font-semibold' },
+                                                    totalBoxCount + ' kutu PFF Ineligible. Batch\'lere bolmek placement fee\'yi dusurur.'
                                                 )
                                             ),
-                                            h('tbody', null,
-                                                sortItems(items).map((item, idx) =>
-                                                    h('tr', { key: item.sku, className: idx % 2 === 0 ? 'bg-white' : 'bg-gray-50' },
-                                                        h('td', { className: 'p-2 font-mono text-blue-600' }, item.sku),
-                                                        h('td', { className: 'p-2 text-right font-semibold' }, item.totalQty)
-                                                    )
-                                                )
-                                            )
-                                        )
-                                    ),
-
-                                    // Step 1 Buttons
-                                    h('div', { className: 'flex gap-2' },
-                                        h('button', {
-                                            onClick: () => copyStep1ToClipboard(items, cat.key),
-                                            className: 'flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold text-sm'
-                                        }, '📋 Copy (for Excel)'),
-                                        h('button', {
-                                            onClick: () => downloadStep1XLSX(items, 'Step1_' + cat.key + '.xlsx', cat.key),
-                                            className: 'flex-1 px-4 py-2 bg-blue-800 text-white rounded-lg hover:bg-blue-900 font-semibold text-sm'
-                                        }, '📥 Download Excel')
-                                    ),
-
-                                    isStep1Done && h('p', { className: 'text-green-600 text-sm mt-2 font-semibold text-center' },
-                                        '✓ Step 1 completed'
-                                    )
-                                ),
-
-                                // STEP 2 Section - Only show after Step 1
-                                isStep1Done && h('div', { className: 'p-4 bg-purple-50 rounded-lg' },
-                                    h('div', { className: 'flex justify-between items-center mb-3' },
-                                        h('h4', { className: 'font-semibold text-purple-800' },
-                                            'STEP 2 - Amazon Approved (' + selectedCount + '/' + items.length + ' selected)'
-                                        ),
-                                        h('div', { className: 'bg-purple-200 px-3 py-1 rounded-lg' },
-                                            h('span', { className: 'text-purple-900 font-bold text-sm' },
-                                                'Total Boxes: ' + selectedItems.reduce((sum, item) => sum + item.boxCount, 0)
-                                            )
-                                        )
-                                    ),
-
-                                    // Select All / Deselect All
-                                    h('div', { className: 'flex gap-2 mb-3' },
-                                        h('button', {
-                                            onClick: () => toggleAllSkus(cat.key, items, true),
-                                            className: 'px-3 py-1 bg-green-100 text-green-800 rounded text-xs font-semibold hover:bg-green-200'
-                                        }, 'Select All'),
-                                        h('button', {
-                                            onClick: () => toggleAllSkus(cat.key, items, false),
-                                            className: 'px-3 py-1 bg-red-100 text-red-800 rounded text-xs font-semibold hover:bg-red-200'
-                                        }, 'Deselect All')
-                                    ),
-
-                                    // Checkbox List (sorted)
-                                    h('div', { className: 'bg-white rounded border mb-3 max-h-80 overflow-y-auto' },
-                                        sortItems(items).map((item, idx) => {
-                                            const isSelected = selectedSkus[cat.key]?.[item.sku] ?? true;
-                                            const koliNos = item.boxes.map(b => b.koli_no + '(' + b.quantity + ')').join(', ');
-                                            return h('label', {
-                                                key: item.sku + '-' + item.quantityValue,
-                                                className: 'block p-3 cursor-pointer hover:bg-gray-50 border-b ' +
-                                                    (isSelected ? '' : 'bg-red-50 opacity-60')
-                                            },
-                                                h('div', { className: 'flex items-center' },
+                                            h('div', { className: 'flex items-center gap-3' },
+                                                h('label', { className: 'flex items-center gap-2 text-sm font-semibold text-amber-900' },
                                                     h('input', {
                                                         type: 'checkbox',
-                                                        checked: isSelected,
-                                                        onChange: () => toggleSku(cat.key, item.sku),
-                                                        className: 'w-5 h-5 mr-3'
+                                                        checked: !!splitEnabled[cat.key],
+                                                        onChange: () => setSplitEnabled(prev => ({ ...prev, [cat.key]: !prev[cat.key] })),
+                                                        className: 'w-4 h-4'
                                                     }),
-                                                    h('div', { className: 'flex-1' },
-                                                        h('span', { className: 'font-mono text-blue-600 font-semibold' }, item.sku),
-                                                        h('span', { className: 'text-gray-500 text-sm ml-3' },
-                                                            item.boxCount + ' boxes, ' + item.totalQty + ' units'
+                                                    'Batch\'lere bol'
+                                                ),
+                                                splitEnabled[cat.key] && h('select', {
+                                                    value: batchSize,
+                                                    onChange: (e) => setBatchSize(parseInt(e.target.value)),
+                                                    className: 'border border-amber-400 rounded px-2 py-1 text-sm bg-white'
+                                                },
+                                                    h('option', { value: 5 }, '5 kutu/batch'),
+                                                    h('option', { value: 10 }, '10 kutu/batch'),
+                                                    h('option', { value: 15 }, '15 kutu/batch'),
+                                                    h('option', { value: 20 }, '20 kutu/batch')
+                                                ),
+                                                isSplit && h('span', { className: 'text-xs text-amber-700 font-semibold' },
+                                                    splitIntoBatches(items, batchSize).length + ' batch'
+                                                )
+                                            )
+                                        )
+                                    )
+                                );
+                            }
+
+                            // Render each card group
+                            cardGroups.forEach(cg => {
+                                const cgKey = cg.cardKey;
+                                const cgItems = cg.items;
+                                const isStep1Done = step1Completed[cgKey];
+                                const selectedItems = (cgItems || []).filter(item => selectedSkus[cgKey]?.[item.sku] !== false);
+                                const selectedCount = selectedItems.length;
+
+                                elements.push(
+                                    h('div', { key: cgKey, className: 'bg-white rounded-xl shadow-lg p-6 border-l-4 ' + cat.color },
+                                        h('div', { className: 'flex justify-between items-center mb-4' },
+                                            h('h3', { className: 'font-bold text-xl' }, cg.title),
+                                            h('span', { className: 'text-sm text-gray-500' },
+                                                cgItems.length + ' SKU, ' + cgItems.reduce((sum, item) => sum + item.boxCount, 0) + ' boxes'
+                                            )
+                                        ),
+
+                                        // STEP 1 Section
+                                        h('div', { className: 'mb-4 p-4 bg-blue-50 rounded-lg' },
+                                            h('h4', { className: 'font-semibold mb-3 text-blue-800' }, 'STEP 1 - List to Send to Amazon'),
+
+                                            h('div', { className: 'bg-white rounded border mb-3 max-h-48 overflow-y-auto' },
+                                                h('table', { className: 'w-full text-sm' },
+                                                    h('thead', { className: 'bg-gray-100 sticky top-0' },
+                                                        h('tr', null,
+                                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Merchant SKU'),
+                                                            h('th', { className: 'text-right p-2 font-semibold' }, 'Quantity')
+                                                        )
+                                                    ),
+                                                    h('tbody', null,
+                                                        sortItems(cgItems).map((item, idx) =>
+                                                            h('tr', { key: item.sku, className: idx % 2 === 0 ? 'bg-white' : 'bg-gray-50' },
+                                                                h('td', { className: 'p-2 font-mono text-blue-600' }, item.sku),
+                                                                h('td', { className: 'p-2 text-right font-semibold' }, item.totalQty)
+                                                            )
                                                         )
                                                     )
-                                                ),
-                                                h('div', { className: 'ml-8 mt-1 text-xs text-gray-400' },
-                                                    'Boxes: ' + koliNos
                                                 )
-                                            );
-                                        })
-                                    ),
+                                            ),
 
-                                    // Step 2 & Mapping Buttons
-                                    h('div', { className: 'flex gap-2 mb-2' },
-                                        h('button', {
-                                            onClick: () => downloadStep2XLSX(selectedItems, 'Step2_' + cat.key + '.xlsx', cat.pack),
-                                            disabled: selectedCount === 0,
-                                            className: 'flex-1 px-4 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-semibold disabled:opacity-50 disabled:cursor-not-allowed'
-                                        }, 'Download STEP 2 (' + selectedCount + ' SKU)'),
-                                        h('button', {
-                                            onClick: () => downloadBoxMapping(selectedItems, 'Mapping_' + cat.key + '.xlsx', cat.pack),
-                                            disabled: selectedCount === 0,
-                                            className: 'flex-1 px-4 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-semibold disabled:opacity-50 disabled:cursor-not-allowed'
-                                        }, 'Download Mapping')
-                                    ),
-                                    // Mark as Sent Button
-                                    h('button', {
-                                        onClick: async () => {
-                                            const count = await markBoxesAsSent(selectedItems);
-                                            alert(count + ' boxes marked as sent!');
-                                        },
-                                        disabled: selectedCount === 0,
-                                        className: 'w-full px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed'
-                                    }, '✓ Mark Selected as Sent (' + selectedItems.reduce((sum, item) => sum + item.boxCount, 0) + ' boxes)')
-                                )
-                            );
+                                            h('div', { className: 'flex gap-2' },
+                                                h('button', {
+                                                    onClick: () => copyStep1ToClipboard(cgItems, cgKey),
+                                                    className: 'flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold text-sm'
+                                                }, '📋 Copy (for Excel)'),
+                                                h('button', {
+                                                    onClick: () => downloadStep1XLSX(cgItems, 'Step1_' + cgKey + '.xlsx', cgKey),
+                                                    className: 'flex-1 px-4 py-2 bg-blue-800 text-white rounded-lg hover:bg-blue-900 font-semibold text-sm'
+                                                }, '📥 Download Excel')
+                                            ),
+
+                                            isStep1Done && h('p', { className: 'text-green-600 text-sm mt-2 font-semibold text-center' },
+                                                '✓ Step 1 completed'
+                                            )
+                                        ),
+
+                                        // STEP 2 Section
+                                        isStep1Done && h('div', { className: 'p-4 bg-purple-50 rounded-lg' },
+                                            h('div', { className: 'flex justify-between items-center mb-3' },
+                                                h('h4', { className: 'font-semibold text-purple-800' },
+                                                    'STEP 2 - Amazon Approved (' + selectedCount + '/' + cgItems.length + ' selected)'
+                                                ),
+                                                h('div', { className: 'bg-purple-200 px-3 py-1 rounded-lg' },
+                                                    h('span', { className: 'text-purple-900 font-bold text-sm' },
+                                                        'Total Boxes: ' + selectedItems.reduce((sum, item) => sum + item.boxCount, 0)
+                                                    )
+                                                )
+                                            ),
+
+                                            h('div', { className: 'flex gap-2 mb-3' },
+                                                h('button', {
+                                                    onClick: () => toggleAllSkus(cgKey, cgItems, true),
+                                                    className: 'px-3 py-1 bg-green-100 text-green-800 rounded text-xs font-semibold hover:bg-green-200'
+                                                }, 'Select All'),
+                                                h('button', {
+                                                    onClick: () => toggleAllSkus(cgKey, cgItems, false),
+                                                    className: 'px-3 py-1 bg-red-100 text-red-800 rounded text-xs font-semibold hover:bg-red-200'
+                                                }, 'Deselect All')
+                                            ),
+
+                                            h('div', { className: 'bg-white rounded border mb-3 max-h-80 overflow-y-auto' },
+                                                sortItems(cgItems).map((item, idx) => {
+                                                    const isSelected = selectedSkus[cgKey]?.[item.sku] !== false;
+                                                    const koliNos = item.boxes.map(b => b.koli_no + '(' + b.quantity + ')').join(', ');
+                                                    return h('label', {
+                                                        key: item.sku + '-' + item.quantityValue,
+                                                        className: 'block p-3 cursor-pointer hover:bg-gray-50 border-b ' +
+                                                            (isSelected ? '' : 'bg-red-50 opacity-60')
+                                                    },
+                                                        h('div', { className: 'flex items-center' },
+                                                            h('input', {
+                                                                type: 'checkbox',
+                                                                checked: isSelected,
+                                                                onChange: () => toggleSku(cgKey, item.sku),
+                                                                className: 'w-5 h-5 mr-3'
+                                                            }),
+                                                            h('div', { className: 'flex-1' },
+                                                                h('span', { className: 'font-mono text-blue-600 font-semibold' }, item.sku),
+                                                                h('span', { className: 'text-gray-500 text-sm ml-3' },
+                                                                    item.boxCount + ' boxes, ' + item.totalQty + ' units'
+                                                                )
+                                                            )
+                                                        ),
+                                                        h('div', { className: 'ml-8 mt-1 text-xs text-gray-400' },
+                                                            'Boxes: ' + koliNos
+                                                        )
+                                                    );
+                                                })
+                                            ),
+
+                                            h('div', { className: 'flex gap-2 mb-2' },
+                                                h('button', {
+                                                    onClick: () => downloadStep2XLSX(selectedItems, 'Step2_' + cgKey + '.xlsx', cg.pack),
+                                                    disabled: selectedCount === 0,
+                                                    className: 'flex-1 px-4 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-semibold disabled:opacity-50 disabled:cursor-not-allowed'
+                                                }, 'Download STEP 2 (' + selectedCount + ' SKU)'),
+                                                h('button', {
+                                                    onClick: () => downloadBoxMapping(selectedItems, 'Mapping_' + cgKey + '.xlsx', cg.pack),
+                                                    disabled: selectedCount === 0,
+                                                    className: 'flex-1 px-4 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-semibold disabled:opacity-50 disabled:cursor-not-allowed'
+                                                }, 'Download Mapping')
+                                            ),
+                                            h('button', {
+                                                onClick: async () => {
+                                                    const count = await markBoxesAsSent(selectedItems);
+                                                    alert(count + ' boxes marked as sent!');
+                                                },
+                                                disabled: selectedCount === 0,
+                                                className: 'w-full px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed'
+                                            }, '✓ Mark Selected as Sent (' + selectedItems.reduce((sum, item) => sum + item.boxCount, 0) + ' boxes)')
+                                        )
+                                    )
+                                );
+                            });
+
+                            return elements;
                         })
                     )
                 )
