@@ -13,10 +13,7 @@
     <script>
         // Prevent direct access - must be loaded in iframe from SSO portal
         if (window.self === window.top) {
-            document.body.innerHTML = '<h2 style="text-align:center;margin-top:50px;">Bu sayfaya doğrudan erişilemez. Lütfen ShipMate üzerinden giriş yapın.</h2>';
-            setTimeout(function() {
-                window.location.href = 'https://apps.iwa.web.tr';
-            }, 2000);
+            window.location.href = 'https://apps.iwa.web.tr';
         }
     </script>
 </head>

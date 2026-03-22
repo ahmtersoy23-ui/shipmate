@@ -1,0 +1,1411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Amazon FBA Template Generator v18</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+</head>
+<body class="bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50 min-h-screen p-4">
+    <script>
+        // Iframe guard - prevent direct access
+        if (window.self === window.top) {
+            window.location.href = '/';
+        }
+    </script>
+
+    <div id="app"></div>
+
+    <script>
+        const { useState, useEffect, createElement: h } = React;
+
+        const API_BASE = '/api/shipmate';
+
+        function getToken() {
+            return localStorage.getItem('sso_access_token') || '';
+        }
+
+        async function apiCall(method, path, body) {
+            const res = await fetch(API_BASE + path, {
+                method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + getToken()
+                },
+                body: body != null ? JSON.stringify(body) : undefined
+            });
+            if (!res.ok) throw new Error('API error ' + res.status);
+            return res.json();
+        }
+
+        function App() {
+            // Reference Database State
+            const [referansDB, setReferansDB] = useState([]);
+            const [showAddForm, setShowAddForm] = useState(false);
+            const [editingId, setEditingId] = useState(null);
+            const [formData, setFormData] = useState({ fnsku: '', sku: '', size_tier: 'Standard' });
+
+            // Sent Boxes State
+            const [sentBoxes, setSentBoxes] = useState([]);
+
+            // Loading & error state for initial data fetch
+            const [dbLoading, setDbLoading] = useState(true);
+            const [dbError, setDbError] = useState('');
+
+            // Shipment & Analysis State
+            const [gemiFile, setGemiFile] = useState(null);
+            const [result, setResult] = useState(null);
+            const [error, setError] = useState('');
+            const [xlsxReady, setXlsxReady] = useState(false);
+
+            // Step 1 checkbox state - SKU selections per category
+            const [selectedSkus, setSelectedSkus] = useState({});
+            const [step1Completed, setStep1Completed] = useState({});
+
+            // Load reference DB and sent boxes from API on mount
+            useEffect(() => {
+                if (window.XLSX) {
+                    setXlsxReady(true);
+                }
+                const loadData = async () => {
+                    setDbLoading(true);
+                    setDbError('');
+                    try {
+                        const [ref, boxes] = await Promise.all([
+                            apiCall('GET', '/referans'),
+                            apiCall('GET', '/sent-boxes')
+                        ]);
+                        setReferansDB(ref);
+                        setSentBoxes(boxes);
+                    } catch (err) {
+                        console.error('Load data error:', err);
+                        setDbError('Veri yüklenemedi: ' + err.message + ' — Sayfayı yenileyin.');
+                    } finally {
+                        setDbLoading(false);
+                    }
+                };
+                loadData();
+            }, []);
+
+            const readExcelFile = (file) => {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const data = new Uint8Array(e.target.result);
+                            const workbook = window.XLSX.read(data, { type: 'array' });
+                            resolve(workbook);
+                        } catch (err) {
+                            reject(err);
+                        }
+                    };
+                    reader.onerror = reject;
+                    reader.readAsArrayBuffer(file);
+                });
+            };
+
+            const parseExcelSheet = (workbook, sheetName) => {
+                const sheet = workbook.Sheets[sheetName];
+                if (!sheet) {
+                    throw new Error('Sheet not found: ' + sheetName);
+                }
+
+                const jsonData = window.XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+                return jsonData.map(row => {
+                    const normalizedRow = {};
+                    Object.keys(row).forEach(key => {
+                        const normalizedKey = key.toLowerCase().trim().replace(/\s+/g, '_');
+                        normalizedRow[normalizedKey] = String(row[key] || '').trim();
+                    });
+                    return normalizedRow;
+                });
+            };
+
+            // ==================== REFERENCE DB FUNCTIONS ====================
+
+            const addReferans = async () => {
+                if (!formData.fnsku || !formData.sku) {
+                    alert('FNSKU and SKU are required!');
+                    return;
+                }
+
+                const existing = referansDB.find(r => r.fnsku === formData.fnsku);
+                if (existing && !editingId) {
+                    if (!confirm('This FNSKU already exists. Update it?')) return;
+                }
+
+                try {
+                    await apiCall('POST', '/referans', formData);
+                    const updated = await apiCall('GET', '/referans');
+                    setReferansDB(updated);
+                    setEditingId(null);
+                    setFormData({ fnsku: '', sku: '', size_tier: 'Standard' });
+                    setShowAddForm(false);
+                } catch (err) {
+                    alert('Save error: ' + err.message);
+                }
+            };
+
+            const deleteReferans = async (id) => {
+                if (confirm('Are you sure you want to delete this record?')) {
+                    try {
+                        await apiCall('DELETE', '/referans/' + id);
+                        const updated = await apiCall('GET', '/referans');
+                        setReferansDB(updated);
+                    } catch (err) {
+                        alert('Delete error: ' + err.message);
+                    }
+                }
+            };
+
+            const editReferans = (item) => {
+                setFormData({ fnsku: item.fnsku, sku: item.sku, size_tier: item.size_tier });
+                setEditingId(item.id);
+                setShowAddForm(true);
+            };
+
+            const importReferansFromExcel = async (file) => {
+                try {
+                    const workbook = await readExcelFile(file);
+                    const sheetName = workbook.SheetNames[0];
+                    const data = parseExcelSheet(workbook, sheetName);
+
+                    const records = [];
+                    data.forEach(row => {
+                        const fnsku = row.fnsku || row.FNSKU || '';
+                        const sku = row.sku || row.SKU || row.msku || row.MSKU || '';
+                        const size_tier = row.size_tier || row.tier || row.size || 'Standard';
+                        if (!fnsku || !sku) return;
+                        records.push({ fnsku, sku, size_tier });
+                    });
+
+                    if (records.length === 0) {
+                        alert('No valid rows found in file.');
+                        return;
+                    }
+
+                    const res = await apiCall('POST', '/referans/bulk', { records });
+                    const updated = await apiCall('GET', '/referans');
+                    setReferansDB(updated);
+                    alert(`Import completed!\n${res.upserted} records saved`);
+                } catch (err) {
+                    alert('Import error: ' + err.message);
+                }
+            };
+
+            const exportReferansToExcel = () => {
+                if (!xlsxReady || referansDB.length === 0) return;
+
+                const ws_data = [['FNSKU', 'SKU', 'Size Tier']];
+                referansDB.forEach(r => {
+                    ws_data.push([r.fnsku, r.sku, r.size_tier]);
+                });
+
+                const ws = window.XLSX.utils.aoa_to_sheet(ws_data);
+                const wb = window.XLSX.utils.book_new();
+                window.XLSX.utils.book_append_sheet(wb, ws, 'Reference');
+                window.XLSX.writeFile(wb, 'Reference_Backup_' + new Date().toISOString().slice(0,10) + '.xlsx');
+            };
+
+            const resetReferansDB = async () => {
+                if (confirm('ARE YOU SURE YOU WANT TO DELETE THE ENTIRE REFERENCE DATABASE?\n\nThis action cannot be undone!')) {
+                    if (confirm('ARE YOU REALLY SURE?')) {
+                        try {
+                            await apiCall('DELETE', '/referans/reset');
+                            setReferansDB([]);
+                            alert('Database has been reset.');
+                        } catch (err) {
+                            alert('Reset error: ' + err.message);
+                        }
+                    }
+                }
+            };
+
+            // ==================== SENT BOXES FUNCTIONS ====================
+
+            const readCSVFile = (file) => {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const text = e.target.result;
+                            const lines = text.split('\n').filter(line => line.trim());
+                            if (lines.length === 0) {
+                                resolve([]);
+                                return;
+                            }
+
+                            // Detect delimiter (comma or semicolon or tab)
+                            const firstLine = lines[0];
+                            let delimiter = ',';
+                            if (firstLine.includes('\t')) delimiter = '\t';
+                            else if (firstLine.includes(';')) delimiter = ';';
+
+                            const headers = lines[0].split(delimiter).map(h => h.trim().toLowerCase().replace(/\s+/g, '_'));
+                            const data = [];
+
+                            for (let i = 1; i < lines.length; i++) {
+                                const values = lines[i].split(delimiter);
+                                const row = {};
+                                headers.forEach((header, idx) => {
+                                    row[header] = (values[idx] || '').trim();
+                                });
+                                data.push(row);
+                            }
+                            resolve(data);
+                        } catch (err) {
+                            reject(err);
+                        }
+                    };
+                    reader.onerror = reject;
+                    reader.readAsText(file);
+                });
+            };
+
+            const importSentBoxesFromExcel = async (file, bulkMode = false) => {
+                try {
+                    let data;
+
+                    // Check if CSV file
+                    if (file.name.toLowerCase().endsWith('.csv')) {
+                        data = await readCSVFile(file);
+                    } else {
+                        const workbook = await readExcelFile(file);
+                        const sheetName = workbook.SheetNames[0];
+                        data = parseExcelSheet(workbook, sheetName);
+                    }
+
+                    // Extract description from filename (remove koli_no_ prefix and extension)
+                    let description = file.name.replace(/\.(xlsx|xls|csv)$/i, '');
+                    description = description.replace(/^koli_no_/i, '');
+
+                    // Use today's date as upload date
+                    const uploadDate = new Date().toISOString().slice(0,10);
+
+                    const records = [];
+                    data.forEach(row => {
+                        const boxNo = row.koli_no || row.box_no || '';
+                        const sku = row.sku || row.SKU || '';
+                        if (!boxNo) return;
+                        records.push({ box_no: boxNo, sku, date: uploadDate, description });
+                    });
+
+                    if (records.length === 0) {
+                        return bulkMode ? { added: 0, duplicates: 0 } : null;
+                    }
+
+                    const res = await apiCall('POST', '/sent-boxes/bulk', { records });
+                    const updated = await apiCall('GET', '/sent-boxes');
+                    setSentBoxes(updated);
+
+                    if (bulkMode) {
+                        return { added: res.inserted, duplicates: res.skipped };
+                    }
+
+                    alert(`Import completed!\n${res.inserted} boxes added\n${res.skipped} duplicates skipped\nDescription: ${description}`);
+                } catch (err) {
+                    if (!bulkMode) {
+                        alert('Import error: ' + err.message);
+                    }
+                    return null;
+                }
+            };
+
+            const exportSentBoxesToExcel = () => {
+                if (!xlsxReady || sentBoxes.length === 0) return;
+
+                const ws_data = [['Box No', 'SKU', 'Date', 'Description']];
+                sentBoxes.forEach(b => {
+                    ws_data.push([b.box_no, b.sku || '', b.date || '', b.description || '']);
+                });
+
+                const ws = window.XLSX.utils.aoa_to_sheet(ws_data);
+                const wb = window.XLSX.utils.book_new();
+                window.XLSX.utils.book_append_sheet(wb, ws, 'Sent Boxes');
+                window.XLSX.writeFile(wb, 'Sent_Boxes_' + new Date().toISOString().slice(0,10) + '.xlsx');
+            };
+
+            const resetSentBoxes = async () => {
+                if (confirm('ARE YOU SURE YOU WANT TO DELETE ALL SENT BOXES HISTORY?\n\nThis action cannot be undone!')) {
+                    try {
+                        await apiCall('DELETE', '/sent-boxes/reset');
+                        setSentBoxes([]);
+                        alert('Sent boxes history has been reset.');
+                    } catch (err) {
+                        alert('Reset error: ' + err.message);
+                    }
+                }
+            };
+
+            const markBoxesAsSent = async (items) => {
+                const today = new Date().toISOString().slice(0,10);
+                const records = [];
+
+                items.forEach(item => {
+                    item.boxes.forEach(box => {
+                        records.push({ box_no: box.koli_no, sku: item.sku, date: today });
+                    });
+                });
+
+                if (records.length === 0) return 0;
+
+                try {
+                    const res = await apiCall('POST', '/sent-boxes/bulk', { records });
+                    const updated = await apiCall('GET', '/sent-boxes');
+                    setSentBoxes(updated);
+                    return res.inserted;
+                } catch (err) {
+                    alert('Mark as sent error: ' + err.message);
+                    return 0;
+                }
+            };
+
+            // ==================== SHIPMENT ANALYSIS FUNCTIONS ====================
+
+            const processGemi = async () => {
+                if (!gemiFile) {
+                    setError('Please upload the shipment file!');
+                    return;
+                }
+
+                if (referansDB.length === 0) {
+                    setError('Reference database is empty! Add references first.');
+                    return;
+                }
+
+                try {
+                    const gemiWorkbook = await readExcelFile(gemiFile);
+                    const gemiSheetName = gemiWorkbook.SheetNames.find(s => s.toLowerCase().includes('gemi')) || gemiWorkbook.SheetNames[0];
+                    const gemiData = parseExcelSheet(gemiWorkbook, gemiSheetName);
+
+                    const templates = generateTemplates(gemiData);
+
+                    setResult(templates);
+                    setError('');
+
+                    // Initialize all checkboxes as checked
+                    const initialSelected = {};
+                    Object.keys(templates.categories).forEach(catKey => {
+                        initialSelected[catKey] = {};
+                        templates.categories[catKey].forEach(item => {
+                            initialSelected[catKey][item.sku] = true;
+                        });
+                    });
+                    setSelectedSkus(initialSelected);
+                    setStep1Completed({});
+                } catch (err) {
+                    setError('Error: ' + err.message);
+                    console.error('Error:', err);
+                }
+            };
+
+            const generateTemplates = (gemiData) => {
+                // Create map from Reference DB
+                const fnSkuMap = {};
+                referansDB.forEach(row => {
+                    fnSkuMap[row.fnsku] = { sku: row.sku, size_tier: row.size_tier };
+                });
+
+                // Create set from Sent Boxes for quick lookup
+                const sentBoxNosMap = {};
+                sentBoxes.forEach(b => {
+                    sentBoxNosMap[b.box_no] = { sku: b.sku, date: b.date };
+                });
+
+                const skuGroups = {};
+                const missingFnskus = new Set();
+                const skippedBoxes = [];
+                const duplicateKoliNos = [];
+                const previouslySentBoxes = [];
+                const seenKoliNos = {};
+                let totalBoxesInGemi = gemiData.length;
+                let totalUnitsInGemi = 0;
+
+                // First check for duplicate box numbers and previously sent boxes
+                gemiData.forEach((box, idx) => {
+                    const koliNo = box.koli_no || box.box_no || ('Row-' + (idx + 2));
+                    if (seenKoliNos[koliNo]) {
+                        duplicateKoliNos.push({ koli_no: koliNo, row1: seenKoliNos[koliNo], row2: idx + 2 });
+                    } else {
+                        seenKoliNos[koliNo] = idx + 2;
+                    }
+                    // Check if this box was previously sent
+                    if (sentBoxNosMap[koliNo]) {
+                        previouslySentBoxes.push({
+                            koli_no: koliNo,
+                            row: idx + 2,
+                            sku: sentBoxNosMap[koliNo].sku,
+                            date: sentBoxNosMap[koliNo].date
+                        });
+                    }
+                });
+
+                gemiData.forEach((box, idx) => {
+                    const koliNo = box.koli_no || box.box_no || ('Row-' + (idx + 2));
+                    const fnsku = (box.fnsku || '').trim();
+                    const qty = parseInt(box.quantity) || 0;
+
+                    totalUnitsInGemi += qty;
+
+                    if (!fnsku || fnsku.length === 0) {
+                        skippedBoxes.push({ koli_no: koliNo, reason: 'FNSKU empty', fnsku: '-' });
+                        return;
+                    }
+
+                    if (fnsku.length < 5 || /^[a-z\s]+$/i.test(fnsku)) {
+                        skippedBoxes.push({ koli_no: koliNo, reason: 'Invalid format', fnsku: fnsku });
+                        return;
+                    }
+
+                    const mapping = fnSkuMap[fnsku];
+                    if (!mapping) {
+                        missingFnskus.add(fnsku);
+                        skippedBoxes.push({ koli_no: koliNo, reason: 'Not in reference', fnsku: fnsku });
+                        return;
+                    }
+
+                    const sku = mapping.sku;
+                    if (!sku) {
+                        skippedBoxes.push({ koli_no: koliNo, reason: 'SKU empty', fnsku: fnsku });
+                        return;
+                    }
+
+                    if (!skuGroups[sku]) {
+                        skuGroups[sku] = {
+                            sku: sku,
+                            fnsku: fnsku,
+                            name: box.name || box.product_name || '',
+                            tier: mapping.size_tier,
+                            boxes: []
+                        };
+                    }
+
+                    skuGroups[sku].boxes.push({
+                        koli_no: koliNo,
+                        quantity: qty,
+                        // cm -> inch (1 cm = 0.393701 inch), kg -> lbs (1 kg = 2.20462 lbs)
+                        weight: (parseFloat(box.weight || 0) * 2.20462).toFixed(1),
+                        length: (parseFloat(box.length || 0) * 0.393701).toFixed(1),
+                        width: (parseFloat(box.width || 0) * 0.393701).toFixed(1),
+                        height: (parseFloat(box.height || 0) * 0.393701).toFixed(1)
+                    });
+                });
+
+                const categories = {
+                    standardPffEligible: [],
+                    standardPffIneligible: [],
+                    oversizePffEligible: [],
+                    oversizePffIneligible: []
+                };
+
+                let totalBoxesProcessed = 0;
+                let totalUnitsProcessed = 0;
+
+                Object.values(skuGroups).forEach(group => {
+                    const isStandard = (group.tier || '').toLowerCase() === 'standard';
+
+                    // Group boxes by quantity
+                    const qtyGroups = {};
+                    group.boxes.forEach(box => {
+                        const qty = box.quantity;
+                        if (!qtyGroups[qty]) {
+                            qtyGroups[qty] = [];
+                        }
+                        qtyGroups[qty].push(box);
+                    });
+
+                    // Separate PFF Eligible (5+ boxes with equal quantity) from Ineligible
+                    const remainingBoxes = [];
+
+                    Object.entries(qtyGroups).forEach(([qty, boxes]) => {
+                        if (boxes.length >= 5) {
+                            // PFF Eligible - meets 5 identical carton rule ($0 placement fee)
+                            const boxCount = boxes.length;
+                            const totalQty = boxes.reduce((sum, box) => sum + box.quantity, 0);
+
+                            totalBoxesProcessed += boxCount;
+                            totalUnitsProcessed += totalQty;
+
+                            const item = {
+                                sku: group.sku,
+                                fnsku: group.fnsku,
+                                name: group.name,
+                                tier: group.tier,
+                                boxes: boxes,
+                                boxCount: boxCount,
+                                totalQty: totalQty,
+                                quantityValue: parseInt(qty)
+                            };
+
+                            if (isStandard) {
+                                categories.standardPffEligible.push(item);
+                            } else {
+                                categories.oversizePffEligible.push(item);
+                            }
+                        } else {
+                            remainingBoxes.push(...boxes);
+                        }
+                    });
+
+                    // PFF Ineligible - does not meet 5 identical carton rule (placement fee applies)
+                    if (remainingBoxes.length > 0) {
+                        const boxCount = remainingBoxes.length;
+                        const totalQty = remainingBoxes.reduce((sum, box) => sum + box.quantity, 0);
+
+                        totalBoxesProcessed += boxCount;
+                        totalUnitsProcessed += totalQty;
+
+                        const item = {
+                            sku: group.sku,
+                            fnsku: group.fnsku,
+                            name: group.name,
+                            tier: group.tier,
+                            boxes: remainingBoxes,
+                            boxCount: boxCount,
+                            totalQty: totalQty,
+                            quantityValue: Math.round(totalQty / boxCount)
+                        };
+
+                        if (isStandard) {
+                            categories.standardPffIneligible.push(item);
+                        } else {
+                            categories.oversizePffIneligible.push(item);
+                        }
+                    }
+                });
+
+                const verification = {
+                    totalBoxesInGemi,
+                    totalUnitsInGemi,
+                    totalBoxesProcessed,
+                    totalUnitsProcessed,
+                    boxesMatch: totalBoxesInGemi === totalBoxesProcessed,
+                    unitsMatch: totalUnitsInGemi === totalUnitsProcessed
+                };
+
+                return {
+                    categories,
+                    verification,
+                    missingFnskus: Array.from(missingFnskus),
+                    skippedBoxes,
+                    duplicateKoliNos,
+                    previouslySentBoxes
+                };
+            };
+
+            // ==================== STEP 1 & 2 FUNCTIONS ====================
+
+            const sortItems = (items) => {
+                return [...items].sort((a, b) => {
+                    const skuA = a.sku.toUpperCase();
+                    const skuB = b.sku.toUpperCase();
+                    if (skuA < skuB) return -1;
+                    if (skuA > skuB) return 1;
+                    return 0;
+                });
+            };
+
+            const copyStep1ToClipboard = (items, categoryKey) => {
+                const sortedItems = sortItems(items);
+                const lines = ['Merchant SKU\tQuantity'];
+                sortedItems.forEach(item => {
+                    lines.push(item.sku + '\t' + item.totalQty);
+                });
+
+                const text = lines.join('\n');
+
+                // Copy as HTML table as well - Excel understands this better (no header row)
+                const html = '<table>' +
+                    sortedItems.map(item => '<tr><td>' + item.sku + '</td><td>' + item.totalQty + '</td></tr>').join('') +
+                    '</table>';
+
+                navigator.clipboard.write([
+                    new ClipboardItem({
+                        'text/plain': new Blob([text], { type: 'text/plain' }),
+                        'text/html': new Blob([html], { type: 'text/html' })
+                    })
+                ]).then(() => {
+                    alert('Copied to clipboard! You can paste into Excel.');
+                    setStep1Completed(prev => ({ ...prev, [categoryKey]: true }));
+                }).catch(err => {
+                    // Fallback to old method
+                    navigator.clipboard.writeText(text).then(() => {
+                        alert('Copied to clipboard! You can paste into Excel.');
+                        setStep1Completed(prev => ({ ...prev, [categoryKey]: true }));
+                    }).catch(err2 => {
+                        alert('Copy error: ' + err2.message);
+                    });
+                });
+            };
+
+            const downloadStep1XLSX = (items, filename, categoryKey) => {
+                if (!xlsxReady) return;
+
+                try {
+                    const sortedItems = sortItems(items);
+                    const ws_data = [['Merchant SKU', 'Quantity']];
+                    sortedItems.forEach(item => {
+                        ws_data.push([item.sku, item.totalQty]);
+                    });
+
+                    const ws = window.XLSX.utils.aoa_to_sheet(ws_data);
+                    const wb = window.XLSX.utils.book_new();
+                    window.XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+                    window.XLSX.writeFile(wb, filename);
+
+                    setStep1Completed(prev => ({ ...prev, [categoryKey]: true }));
+                } catch (error) {
+                    alert('Download error: ' + error.message);
+                }
+            };
+
+            const toggleSku = (categoryKey, sku) => {
+                setSelectedSkus(prev => ({
+                    ...prev,
+                    [categoryKey]: {
+                        ...prev[categoryKey],
+                        [sku]: !prev[categoryKey][sku]
+                    }
+                }));
+            };
+
+            const toggleAllSkus = (categoryKey, items, checked) => {
+                const newSelected = {};
+                items.forEach(item => {
+                    newSelected[item.sku] = checked;
+                });
+                setSelectedSkus(prev => ({
+                    ...prev,
+                    [categoryKey]: newSelected
+                }));
+            };
+
+            const getSelectedItems = (categoryKey) => {
+                const items = result.categories[categoryKey];
+                const selected = selectedSkus[categoryKey] || {};
+                return items.filter(item => selected[item.sku]);
+            };
+
+            const downloadStep2XLSX = (items, filename, packGroupNumber) => {
+                if (!xlsxReady) return;
+
+                try {
+                    const sortedItems = sortItems(items);
+
+                    const totalBoxes = sortedItems.reduce((sum, item) => sum + item.boxes.length, 0);
+
+                    const ws_data = [
+                        ['Provide the box details for this pack group below.'],
+                        [],
+                        ['Pack group: ' + packGroupNumber],
+                        ['Total SKUs: ' + sortedItems.length],
+                        [],
+                        ['', '', '', '', '', '', '', '', '', '', 'Total box count:', totalBoxes],
+                        []
+                    ];
+
+                    const headerRow = [
+                        'SKU', 'Product title', 'ASIN', 'FNSKU', 'Condition', 'Prep type',
+                        'Who preps unit?', 'Who labels unit?', 'Expected quantity'
+                    ];
+
+                    for (let i = 1; i <= totalBoxes; i++) {
+                        headerRow.push('Box ' + i + ' quantity');
+                    }
+                    ws_data.push(headerRow);
+
+                    let currentBoxIndex = 0;
+
+                    sortedItems.forEach(item => {
+                        const row = [
+                            item.sku, item.name || '', '', item.fnsku,
+                            'New/Item', 'NONE', 'No prep needed', 'By seller', item.totalQty
+                        ];
+
+                        for (let i = 0; i < currentBoxIndex; i++) row.push('');
+                        item.boxes.forEach(box => row.push(box.quantity));
+                        const remainingBoxes = totalBoxes - currentBoxIndex - item.boxes.length;
+                        for (let i = 0; i < remainingBoxes; i++) row.push('');
+
+                        currentBoxIndex += item.boxes.length;
+                        ws_data.push(row);
+                    });
+
+                    ws_data.push([]);
+                    ws_data.push([]);
+
+                    const boxNameRow = ['', '', '', 'Name of box'];
+                    for (let i = 0; i < 5; i++) boxNameRow.push('');
+
+                    let globalBoxNum = 1;
+                    sortedItems.forEach(item => {
+                        for (let i = 0; i < item.boxes.length; i++) {
+                            boxNameRow.push('P' + packGroupNumber + ' - B' + globalBoxNum);
+                            globalBoxNum++;
+                        }
+                    });
+                    ws_data.push(boxNameRow);
+
+                    ['weight', 'width', 'length', 'height'].forEach(prop => {
+                        const label = prop === 'weight' ? 'Box weight (lb)' : 'Box ' + prop + ' (inch)';
+                        const row = ['', '', '', label];
+                        for (let i = 0; i < 5; i++) row.push('');
+                        sortedItems.forEach(item => {
+                            item.boxes.forEach(box => row.push(box[prop] || ''));
+                        });
+                        ws_data.push(row);
+                    });
+
+                    const ws = window.XLSX.utils.aoa_to_sheet(ws_data);
+                    const wb = window.XLSX.utils.book_new();
+                    window.XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+                    window.XLSX.writeFile(wb, filename);
+                } catch (error) {
+                    alert('Download error: ' + error.message);
+                }
+            };
+
+            const downloadBoxMapping = (items, filename, packGroupNumber) => {
+                if (!xlsxReady) return;
+
+                try {
+                    const sortedItems = sortItems(items);
+
+                    const ws_data = [['Box No', 'Box ID', 'SKU', 'FNSKU', 'Quantity']];
+
+                    let boxIndex = 1;
+                    sortedItems.forEach(item => {
+                        item.boxes.forEach(box => {
+                            ws_data.push([
+                                box.koli_no,
+                                'P' + packGroupNumber + '-B' + boxIndex,
+                                item.sku,
+                                item.fnsku,
+                                box.quantity
+                            ]);
+                            boxIndex++;
+                        });
+                    });
+
+                    const ws = window.XLSX.utils.aoa_to_sheet(ws_data);
+                    const wb = window.XLSX.utils.book_new();
+                    window.XLSX.utils.book_append_sheet(wb, ws, 'Mapping');
+                    window.XLSX.writeFile(wb, filename);
+                } catch (error) {
+                    alert('Download error: ' + error.message);
+                }
+            };
+
+            // ==================== RENDER ====================
+
+            return h('div', { className: 'max-w-7xl mx-auto' },
+                // Header
+                h('div', { className: 'bg-white rounded-2xl shadow-2xl p-6 mb-6' },
+                    h('h1', {
+                        className: 'text-3xl font-bold text-center bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent'
+                    }, 'Amazon FBA Template Generator v18')
+                ),
+
+                // ==================== DB STATUS BANNER ====================
+                dbLoading && h('div', { className: 'bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4 text-blue-700 text-sm font-semibold text-center' },
+                    '⏳ Veriler yükleniyor...'
+                ),
+                dbError && h('div', { className: 'bg-red-50 border border-red-300 rounded-xl p-4 mb-4 flex items-center justify-between' },
+                    h('span', { className: 'text-red-700 text-sm font-semibold' }, '⚠️ ' + dbError),
+                    h('button', {
+                        onClick: () => {
+                            setDbError('');
+                            setDbLoading(true);
+                            Promise.all([apiCall('GET', '/referans'), apiCall('GET', '/sent-boxes')])
+                                .then(([ref, boxes]) => { setReferansDB(ref); setSentBoxes(boxes); setDbLoading(false); })
+                                .catch(err => { setDbError('Veri yüklenemedi: ' + err.message); setDbLoading(false); });
+                        },
+                        className: 'ml-4 px-3 py-1 bg-red-600 text-white rounded text-sm font-semibold hover:bg-red-700'
+                    }, 'Tekrar Dene')
+                ),
+
+                // ==================== REFERENCE DATABASE SECTION ====================
+                h('div', { className: 'bg-white rounded-2xl shadow-xl p-6 mb-6' },
+                    h('div', { className: 'flex justify-between items-center mb-4' },
+                        h('h2', { className: 'text-xl font-bold text-gray-800' },
+                            'Reference Database (' + referansDB.length + ' records)'
+                        ),
+                        h('div', { className: 'flex gap-2' },
+                            h('button', {
+                                onClick: () => { setShowAddForm(true); setEditingId(null); setFormData({ fnsku: '', sku: '', size_tier: 'Standard' }); },
+                                className: 'px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-semibold'
+                            }, '+ Add Manual'),
+                            h('label', { className: 'px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold cursor-pointer' },
+                                'Upload Excel',
+                                h('input', {
+                                    type: 'file',
+                                    accept: '.xlsx,.xls',
+                                    onChange: (e) => {
+                                        if (e.target.files[0]) {
+                                            importReferansFromExcel(e.target.files[0]);
+                                            e.target.value = '';
+                                        }
+                                    },
+                                    className: 'hidden'
+                                })
+                            ),
+                            h('button', {
+                                onClick: exportReferansToExcel,
+                                disabled: referansDB.length === 0,
+                                className: 'px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-semibold disabled:opacity-50'
+                            }, 'Export'),
+                            h('button', {
+                                onClick: resetReferansDB,
+                                disabled: referansDB.length === 0,
+                                className: 'px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-semibold disabled:opacity-50'
+                            }, 'Reset')
+                        )
+                    ),
+
+                    // Add/Edit Form
+                    showAddForm && h('div', { className: 'bg-gray-50 p-4 rounded-lg mb-4' },
+                        h('div', { className: 'grid grid-cols-4 gap-4' },
+                            h('input', {
+                                type: 'text',
+                                placeholder: 'FNSKU',
+                                value: formData.fnsku,
+                                onChange: (e) => setFormData(prev => ({ ...prev, fnsku: e.target.value })),
+                                className: 'p-2 border rounded'
+                            }),
+                            h('input', {
+                                type: 'text',
+                                placeholder: 'SKU',
+                                value: formData.sku,
+                                onChange: (e) => setFormData(prev => ({ ...prev, sku: e.target.value })),
+                                className: 'p-2 border rounded'
+                            }),
+                            h('select', {
+                                value: formData.size_tier,
+                                onChange: (e) => setFormData(prev => ({ ...prev, size_tier: e.target.value })),
+                                className: 'p-2 border rounded'
+                            },
+                                h('option', { value: 'Standard' }, 'Standard'),
+                                h('option', { value: 'Oversize' }, 'Oversize')
+                            ),
+                            h('div', { className: 'flex gap-2' },
+                                h('button', {
+                                    onClick: addReferans,
+                                    className: 'px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700'
+                                }, editingId ? 'Update' : 'Add'),
+                                h('button', {
+                                    onClick: () => { setShowAddForm(false); setEditingId(null); },
+                                    className: 'px-4 py-2 bg-gray-400 text-white rounded hover:bg-gray-500'
+                                }, 'Cancel')
+                            )
+                        )
+                    ),
+
+                    // Reference Table
+                    referansDB.length > 0 ? h('div', { className: 'max-h-64 overflow-y-auto border rounded-lg' },
+                        h('table', { className: 'w-full text-sm' },
+                            h('thead', { className: 'bg-gray-100 sticky top-0' },
+                                h('tr', null,
+                                    h('th', { className: 'text-left p-3 font-semibold' }, 'FNSKU'),
+                                    h('th', { className: 'text-left p-3 font-semibold' }, 'SKU'),
+                                    h('th', { className: 'text-left p-3 font-semibold' }, 'Size Tier'),
+                                    h('th', { className: 'text-center p-3 font-semibold w-24' }, 'Actions')
+                                )
+                            ),
+                            h('tbody', null,
+                                referansDB.map((item, idx) =>
+                                    h('tr', { key: item.id, className: idx % 2 === 0 ? 'bg-white' : 'bg-gray-50' },
+                                        h('td', { className: 'p-3 font-mono text-xs' }, item.fnsku),
+                                        h('td', { className: 'p-3 font-mono text-blue-600 font-semibold' }, item.sku),
+                                        h('td', { className: 'p-3' },
+                                            h('span', {
+                                                className: 'px-2 py-1 rounded text-xs ' +
+                                                    (item.size_tier === 'Standard' ? 'bg-green-100 text-green-800' : 'bg-orange-100 text-orange-800')
+                                            }, item.size_tier)
+                                        ),
+                                        h('td', { className: 'p-3 text-center' },
+                                            h('button', {
+                                                onClick: () => editReferans(item),
+                                                className: 'px-2 py-1 text-blue-600 hover:bg-blue-100 rounded mr-1',
+                                                title: 'Edit'
+                                            }, '✏️'),
+                                            h('button', {
+                                                onClick: () => deleteReferans(item.id),
+                                                className: 'px-2 py-1 text-red-600 hover:bg-red-100 rounded',
+                                                title: 'Delete'
+                                            }, '🗑️')
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    ) : h('div', { className: 'text-center py-8 text-gray-500' },
+                        'No records yet. Add manually or upload Excel.'
+                    )
+                ),
+
+                // ==================== SENT BOXES SECTION ====================
+                h('div', { className: 'bg-white rounded-2xl shadow-xl p-6 mb-6' },
+                    h('div', { className: 'flex justify-between items-center mb-4' },
+                        h('h2', { className: 'text-xl font-bold text-gray-800' },
+                            'Sent Boxes History (' + sentBoxes.length + ' boxes)'
+                        ),
+                        h('div', { className: 'flex gap-2' },
+                            h('label', { className: 'px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold cursor-pointer' },
+                                'Import (Bulk)',
+                                h('input', {
+                                    type: 'file',
+                                    accept: '.xlsx,.xls,.csv',
+                                    multiple: true,
+                                    onChange: async (e) => {
+                                        const files = Array.from(e.target.files);
+                                        if (files.length > 0) {
+                                            let totalAdded = 0;
+                                            let totalDuplicates = 0;
+                                            for (const file of files) {
+                                                const result = await importSentBoxesFromExcel(file, true);
+                                                if (result) {
+                                                    totalAdded += result.added;
+                                                    totalDuplicates += result.duplicates;
+                                                }
+                                            }
+                                            alert(`Bulk Import completed!\n${files.length} files processed\n${totalAdded} boxes added\n${totalDuplicates} duplicates skipped`);
+                                        }
+                                        e.target.value = '';
+                                    },
+                                    className: 'hidden'
+                                })
+                            ),
+                            h('button', {
+                                onClick: exportSentBoxesToExcel,
+                                disabled: sentBoxes.length === 0,
+                                className: 'px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-semibold disabled:opacity-50'
+                            }, 'Export'),
+                            h('button', {
+                                onClick: resetSentBoxes,
+                                disabled: sentBoxes.length === 0,
+                                className: 'px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-semibold disabled:opacity-50'
+                            }, 'Reset')
+                        )
+                    ),
+                    sentBoxes.length > 0 ? h('div', { className: 'max-h-48 overflow-y-auto border rounded-lg' },
+                        h('table', { className: 'w-full text-sm' },
+                            h('thead', { className: 'bg-gray-100 sticky top-0' },
+                                h('tr', null,
+                                    h('th', { className: 'text-left p-3 font-semibold' }, 'Box No'),
+                                    h('th', { className: 'text-left p-3 font-semibold' }, 'Date'),
+                                    h('th', { className: 'text-left p-3 font-semibold' }, 'Description')
+                                )
+                            ),
+                            h('tbody', null,
+                                sentBoxes.slice(-50).reverse().map((box, idx) =>
+                                    h('tr', { key: box.id, className: idx % 2 === 0 ? 'bg-white' : 'bg-gray-50' },
+                                        h('td', { className: 'p-3 font-mono text-xs font-semibold' }, box.box_no),
+                                        h('td', { className: 'p-3 text-gray-500' }, box.date || '-'),
+                                        h('td', { className: 'p-3 text-gray-600' }, box.description || '-')
+                                    )
+                                )
+                            )
+                        )
+                    ) : h('div', { className: 'text-center py-6 text-gray-500' },
+                        'No sent boxes recorded yet. Import from Excel/CSV or mark boxes as sent after downloading Step 2.'
+                    ),
+                    sentBoxes.length > 50 && h('p', { className: 'text-xs text-gray-400 mt-2 text-center' },
+                        'Showing last 50 boxes. Total: ' + sentBoxes.length
+                    )
+                ),
+
+                // ==================== SHIPMENT UPLOAD SECTION ====================
+                h('div', { className: 'bg-white rounded-2xl shadow-xl p-6 mb-6' },
+                    h('h2', { className: 'text-xl font-bold text-gray-800 mb-4' }, 'Upload Shipment File'),
+                    h('div', { className: 'flex gap-4 items-center' },
+                        h('div', { className: 'flex-1' },
+                            h('input', {
+                                type: 'file',
+                                accept: '.xlsx,.xls',
+                                onClick: (e) => { e.target.value = ''; }, // Allow selecting same file again
+                                onChange: (e) => {
+                                    if (e.target.files[0]) {
+                                        setGemiFile(e.target.files[0]);
+                                        setError('');
+                                    }
+                                },
+                                className: 'w-full p-3 border-2 border-gray-300 rounded-lg hover:border-blue-500 transition cursor-pointer'
+                            }),
+                            gemiFile && h('p', { className: 'text-green-600 text-sm mt-1 font-semibold' }, gemiFile.name)
+                        ),
+                        h('button', {
+                            onClick: processGemi,
+                            disabled: !gemiFile || !xlsxReady || referansDB.length === 0,
+                            className: 'px-8 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg hover:from-blue-700 hover:to-purple-700 font-semibold disabled:opacity-50 disabled:cursor-not-allowed'
+                        }, 'Analyze'),
+                        result && h('button', {
+                            onClick: processGemi,
+                            disabled: !gemiFile || !xlsxReady || referansDB.length === 0,
+                            className: 'px-8 py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 font-semibold disabled:opacity-50 disabled:cursor-not-allowed'
+                        }, 'Re-Analyze')
+                    ),
+                    error && h('div', { className: 'mt-4 p-4 bg-red-50 border-l-4 border-red-500 rounded' },
+                        h('p', { className: 'text-red-800 text-sm font-semibold' }, error)
+                    )
+                ),
+
+                // ==================== RESULTS SECTION ====================
+                result && h('div', null,
+                    // Reset Button
+                    h('div', { className: 'text-right mb-4' },
+                        h('button', {
+                            onClick: () => {
+                                setResult(null);
+                                setSelectedSkus({});
+                                setStep1Completed({});
+                                setGemiFile(null);
+                                // Clear file input as well
+                                const fileInput = document.querySelector('input[type="file"][accept=".xlsx,.xls"]');
+                                if (fileInput) fileInput.value = '';
+                            },
+                            className: 'px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition font-semibold text-sm'
+                        }, 'Reset Analysis')
+                    ),
+
+                    // Verification Box
+                    h('div', { className: 'bg-white rounded-xl shadow-xl p-6 mb-6' },
+                        h('h2', { className: 'text-2xl font-bold mb-4 text-center' }, 'Analysis Results'),
+
+                        result.verification && h('div', {
+                            className: 'mb-6 p-4 rounded-lg ' + (result.verification.boxesMatch && result.verification.unitsMatch ? 'bg-green-50 border-2 border-green-500' : 'bg-red-50 border-2 border-red-500')
+                        },
+                            h('div', { className: 'grid grid-cols-4 gap-4 text-sm' },
+                                h('div', { className: 'bg-white p-3 rounded text-center' },
+                                    h('div', { className: 'text-gray-600 text-xs mb-1' }, 'Shipment Boxes'),
+                                    h('div', { className: 'text-2xl font-bold' }, result.verification.totalBoxesInGemi)
+                                ),
+                                h('div', { className: 'bg-white p-3 rounded text-center' },
+                                    h('div', { className: 'text-gray-600 text-xs mb-1' }, 'Processed Boxes'),
+                                    h('div', { className: 'text-2xl font-bold ' + (result.verification.boxesMatch ? 'text-green-600' : 'text-red-600') },
+                                        result.verification.totalBoxesProcessed
+                                    )
+                                ),
+                                h('div', { className: 'bg-white p-3 rounded text-center' },
+                                    h('div', { className: 'text-gray-600 text-xs mb-1' }, 'Shipment Units'),
+                                    h('div', { className: 'text-2xl font-bold' }, result.verification.totalUnitsInGemi)
+                                ),
+                                h('div', { className: 'bg-white p-3 rounded text-center' },
+                                    h('div', { className: 'text-gray-600 text-xs mb-1' }, 'Processed Units'),
+                                    h('div', { className: 'text-2xl font-bold ' + (result.verification.unitsMatch ? 'text-green-600' : 'text-red-600') },
+                                        result.verification.totalUnitsProcessed
+                                    )
+                                )
+                            )
+                        ),
+
+                        // Skipped Boxes Warning
+                        result.skippedBoxes && result.skippedBoxes.length > 0 && h('div', { className: 'mb-6 p-4 rounded-lg bg-gray-50 border-2 border-gray-400' },
+                            h('h3', { className: 'font-bold text-lg mb-2 text-gray-800' },
+                                '⚠️ Skipped Boxes (' + result.skippedBoxes.length + ') — referansda eşleşme bulunamadı'
+                            ),
+                            h('div', { className: 'flex gap-3 mb-3 flex-wrap' },
+                                ['FNSKU empty', 'Invalid format', 'Not in reference', 'SKU empty'].map(function(reason) {
+                                    var count = result.skippedBoxes.filter(function(b) { return b.reason === reason; }).length;
+                                    return count > 0 ? h('span', { key: reason, className: 'px-2 py-1 bg-white border rounded text-sm font-mono text-gray-700' },
+                                        reason + ': ' + count
+                                    ) : null;
+                                })
+                            ),
+                            h('div', { className: 'bg-white rounded border max-h-48 overflow-y-auto' },
+                                h('table', { className: 'w-full text-sm' },
+                                    h('thead', { className: 'bg-gray-100 sticky top-0' },
+                                        h('tr', null,
+                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Box No'),
+                                            h('th', { className: 'text-left p-2 font-semibold' }, 'FNSKU'),
+                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Neden')
+                                        )
+                                    ),
+                                    h('tbody', null,
+                                        result.skippedBoxes.slice(0, 50).map(function(b, idx) {
+                                            return h('tr', { key: idx, className: idx % 2 === 0 ? '' : 'bg-gray-50' },
+                                                h('td', { className: 'p-2 font-mono text-xs' }, b.koli_no),
+                                                h('td', { className: 'p-2 font-mono text-xs' }, b.fnsku),
+                                                h('td', { className: 'p-2 text-xs text-red-600 font-semibold' }, b.reason)
+                                            );
+                                        })
+                                    )
+                                )
+                            ),
+                            result.skippedBoxes.length > 50 && h('p', { className: 'text-xs text-gray-500 mt-1 text-right' },
+                                result.skippedBoxes.length + ' kutudan ilk 50 gösteriliyor'
+                            )
+                        ),
+
+                        // Duplicate Box Numbers Warning
+                        result.duplicateKoliNos && result.duplicateKoliNos.length > 0 && h('div', { className: 'mb-6 p-4 rounded-lg bg-red-50 border-2 border-red-500' },
+                            h('h3', { className: 'font-bold text-lg mb-3 text-red-800' },
+                                'WARNING: Duplicate Box Numbers (' + result.duplicateKoliNos.length + ' found)'
+                            ),
+                            h('div', { className: 'bg-white rounded border max-h-48 overflow-y-auto' },
+                                h('table', { className: 'w-full text-sm' },
+                                    h('thead', { className: 'bg-red-100 sticky top-0' },
+                                        h('tr', null,
+                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Box No'),
+                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Row 1'),
+                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Row 2')
+                                        )
+                                    ),
+                                    h('tbody', null,
+                                        result.duplicateKoliNos.map((dup, idx) =>
+                                            h('tr', { key: idx, className: idx % 2 === 0 ? 'bg-white' : 'bg-red-50' },
+                                                h('td', { className: 'p-2 font-mono font-semibold text-red-700' }, dup.koli_no),
+                                                h('td', { className: 'p-2' }, dup.row1),
+                                                h('td', { className: 'p-2' }, dup.row2)
+                                            )
+                                        )
+                                    )
+                                )
+                            ),
+                            h('p', { className: 'text-sm text-red-700 mt-3 font-semibold' },
+                                'Same box number used in multiple rows. Please check your Excel file!'
+                            )
+                        ),
+
+                        // Previously Sent Boxes Warning
+                        result.previouslySentBoxes && result.previouslySentBoxes.length > 0 && h('div', { className: 'mb-6 p-4 rounded-lg bg-orange-50 border-2 border-orange-500' },
+                            h('h3', { className: 'font-bold text-lg mb-3 text-orange-800' },
+                                '⚠️ WARNING: Previously Sent Boxes (' + result.previouslySentBoxes.length + ' found)'
+                            ),
+                            h('div', { className: 'bg-white rounded border max-h-48 overflow-y-auto' },
+                                h('table', { className: 'w-full text-sm' },
+                                    h('thead', { className: 'bg-orange-100 sticky top-0' },
+                                        h('tr', null,
+                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Box No'),
+                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Row'),
+                                            h('th', { className: 'text-left p-2 font-semibold' }, 'SKU'),
+                                            h('th', { className: 'text-left p-2 font-semibold' }, 'Previously Sent')
+                                        )
+                                    ),
+                                    h('tbody', null,
+                                        result.previouslySentBoxes.map((box, idx) =>
+                                            h('tr', { key: idx, className: idx % 2 === 0 ? 'bg-white' : 'bg-orange-50' },
+                                                h('td', { className: 'p-2 font-mono font-semibold text-orange-700' }, box.koli_no),
+                                                h('td', { className: 'p-2' }, box.row),
+                                                h('td', { className: 'p-2 font-mono text-blue-600' }, box.sku || '-'),
+                                                h('td', { className: 'p-2 text-gray-600' }, box.date || '-')
+                                            )
+                                        )
+                                    )
+                                )
+                            ),
+                            h('p', { className: 'text-sm text-orange-700 mt-3 font-semibold' },
+                                'These boxes were already sent before! They may cause duplicates in Amazon inventory.'
+                            )
+                        ),
+
+                        // Missing FNSKUs - Quick Add
+                        result.missingFnskus && result.missingFnskus.length > 0 && h('div', { className: 'mb-6 p-4 rounded-lg bg-yellow-50 border-2 border-yellow-500' },
+                            h('div', { className: 'flex justify-between items-center mb-3' },
+                                h('h3', { className: 'font-bold text-lg text-yellow-800' },
+                                    'FNSKUs Not in Reference (' + result.missingFnskus.length + ' found)'
+                                ),
+                                h('button', {
+                                    onClick: () => {
+                                        if (!xlsxReady) return;
+                                        const ws_data = [['FNSKU', 'SKU', 'Size Tier']];
+                                        result.missingFnskus.forEach(fnsku => {
+                                            ws_data.push([fnsku, '', 'Standard']);
+                                        });
+                                        const ws = window.XLSX.utils.aoa_to_sheet(ws_data);
+                                        const wb = window.XLSX.utils.book_new();
+                                        window.XLSX.utils.book_append_sheet(wb, ws, 'Missing FNSKUs');
+                                        window.XLSX.writeFile(wb, 'Missing_FNSKUs_' + new Date().toISOString().slice(0,10) + '.xlsx');
+                                    },
+                                    className: 'px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 font-semibold text-sm'
+                                }, '📥 Download Excel')
+                            ),
+                            h('div', { className: 'flex flex-wrap gap-2' },
+                                result.missingFnskus.map(fnsku =>
+                                    h('span', { key: fnsku, className: 'px-3 py-1 bg-white rounded border border-yellow-400 font-mono text-sm' },
+                                        fnsku
+                                    )
+                                )
+                            ),
+                            h('p', { className: 'text-sm text-yellow-700 mt-3' },
+                                'Add these FNSKUs to the reference database and re-analyze.'
+                            )
+                        ),
+
+                        // Category Summary
+                        h('div', { className: 'grid grid-cols-2 md:grid-cols-3 gap-4' },
+                            [
+                                { key: 'standardPffEligible', title: 'Standard PFF Eligible', color: 'bg-green-100 text-green-800' },
+                                { key: 'standardPffIneligible', title: 'Standard PFF Ineligible', color: 'bg-red-100 text-red-800' },
+                                { key: 'oversizePffEligible', title: 'Oversize PFF Eligible', color: 'bg-green-100 text-green-800' },
+                                { key: 'oversizePffIneligible', title: 'Oversize PFF Ineligible', color: 'bg-red-100 text-red-800' }
+                            ].map(cat =>
+                                h('div', { key: cat.key, className: cat.color + ' rounded-lg p-4 text-center' },
+                                    h('div', { className: 'text-sm font-semibold mb-1' }, cat.title),
+                                    h('div', { className: 'text-3xl font-bold' }, result.categories[cat.key].length),
+                                    h('div', { className: 'text-xs mt-1' },
+                                        result.categories[cat.key].reduce((sum, item) => sum + item.boxCount, 0) + ' boxes'
+                                    )
+                                )
+                            )
+                        )
+                    ),
+
+                    // ==================== CATEGORY CARDS ====================
+                    h('div', { className: 'grid grid-cols-1 gap-6' },
+                        [
+                            { key: 'standardPffEligible', title: 'Standard PFF Eligible', color: 'border-green-500', pack: 1 },
+                            { key: 'standardPffIneligible', title: 'Standard PFF Ineligible', color: 'border-red-500', pack: 2 },
+                            { key: 'oversizePffEligible', title: 'Oversize PFF Eligible', color: 'border-green-500', pack: 3 },
+                            { key: 'oversizePffIneligible', title: 'Oversize PFF Ineligible', color: 'border-red-500', pack: 4 }
+                        ].map(cat => {
+                            const items = result.categories[cat.key];
+                            if (items.length === 0) return null;
+
+                            const isStep1Done = step1Completed[cat.key];
+                            const selectedItems = getSelectedItems(cat.key);
+                            const selectedCount = selectedItems.length;
+
+                            return h('div', { key: cat.key, className: 'bg-white rounded-xl shadow-lg p-6 border-l-4 ' + cat.color },
+                                h('div', { className: 'flex justify-between items-center mb-4' },
+                                    h('h3', { className: 'font-bold text-xl' }, cat.title),
+                                    h('span', { className: 'text-sm text-gray-500' },
+                                        items.length + ' SKU, ' + items.reduce((sum, item) => sum + item.boxCount, 0) + ' boxes'
+                                    )
+                                ),
+
+                                // STEP 1 Section
+                                h('div', { className: 'mb-4 p-4 bg-blue-50 rounded-lg' },
+                                    h('h4', { className: 'font-semibold mb-3 text-blue-800' }, 'STEP 1 - List to Send to Amazon'),
+
+                                    // Step 1 Table (sorted)
+                                    h('div', { className: 'bg-white rounded border mb-3 max-h-48 overflow-y-auto' },
+                                        h('table', { className: 'w-full text-sm' },
+                                            h('thead', { className: 'bg-gray-100 sticky top-0' },
+                                                h('tr', null,
+                                                    h('th', { className: 'text-left p-2 font-semibold' }, 'Merchant SKU'),
+                                                    h('th', { className: 'text-right p-2 font-semibold' }, 'Quantity')
+                                                )
+                                            ),
+                                            h('tbody', null,
+                                                sortItems(items).map((item, idx) =>
+                                                    h('tr', { key: item.sku, className: idx % 2 === 0 ? 'bg-white' : 'bg-gray-50' },
+                                                        h('td', { className: 'p-2 font-mono text-blue-600' }, item.sku),
+                                                        h('td', { className: 'p-2 text-right font-semibold' }, item.totalQty)
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    ),
+
+                                    // Step 1 Buttons
+                                    h('div', { className: 'flex gap-2' },
+                                        h('button', {
+                                            onClick: () => copyStep1ToClipboard(items, cat.key),
+                                            className: 'flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold text-sm'
+                                        }, '📋 Copy (for Excel)'),
+                                        h('button', {
+                                            onClick: () => downloadStep1XLSX(items, 'Step1_' + cat.key + '.xlsx', cat.key),
+                                            className: 'flex-1 px-4 py-2 bg-blue-800 text-white rounded-lg hover:bg-blue-900 font-semibold text-sm'
+                                        }, '📥 Download Excel')
+                                    ),
+
+                                    isStep1Done && h('p', { className: 'text-green-600 text-sm mt-2 font-semibold text-center' },
+                                        '✓ Step 1 completed'
+                                    )
+                                ),
+
+                                // STEP 2 Section - Only show after Step 1
+                                isStep1Done && h('div', { className: 'p-4 bg-purple-50 rounded-lg' },
+                                    h('div', { className: 'flex justify-between items-center mb-3' },
+                                        h('h4', { className: 'font-semibold text-purple-800' },
+                                            'STEP 2 - Amazon Approved (' + selectedCount + '/' + items.length + ' selected)'
+                                        ),
+                                        h('div', { className: 'bg-purple-200 px-3 py-1 rounded-lg' },
+                                            h('span', { className: 'text-purple-900 font-bold text-sm' },
+                                                'Total Boxes: ' + selectedItems.reduce((sum, item) => sum + item.boxCount, 0)
+                                            )
+                                        )
+                                    ),
+
+                                    // Select All / Deselect All
+                                    h('div', { className: 'flex gap-2 mb-3' },
+                                        h('button', {
+                                            onClick: () => toggleAllSkus(cat.key, items, true),
+                                            className: 'px-3 py-1 bg-green-100 text-green-800 rounded text-xs font-semibold hover:bg-green-200'
+                                        }, 'Select All'),
+                                        h('button', {
+                                            onClick: () => toggleAllSkus(cat.key, items, false),
+                                            className: 'px-3 py-1 bg-red-100 text-red-800 rounded text-xs font-semibold hover:bg-red-200'
+                                        }, 'Deselect All')
+                                    ),
+
+                                    // Checkbox List (sorted)
+                                    h('div', { className: 'bg-white rounded border mb-3 max-h-80 overflow-y-auto' },
+                                        sortItems(items).map((item, idx) => {
+                                            const isSelected = selectedSkus[cat.key]?.[item.sku] ?? true;
+                                            const koliNos = item.boxes.map(b => b.koli_no + '(' + b.quantity + ')').join(', ');
+                                            return h('label', {
+                                                key: item.sku + '-' + item.quantityValue,
+                                                className: 'block p-3 cursor-pointer hover:bg-gray-50 border-b ' +
+                                                    (isSelected ? '' : 'bg-red-50 opacity-60')
+                                            },
+                                                h('div', { className: 'flex items-center' },
+                                                    h('input', {
+                                                        type: 'checkbox',
+                                                        checked: isSelected,
+                                                        onChange: () => toggleSku(cat.key, item.sku),
+                                                        className: 'w-5 h-5 mr-3'
+                                                    }),
+                                                    h('div', { className: 'flex-1' },
+                                                        h('span', { className: 'font-mono text-blue-600 font-semibold' }, item.sku),
+                                                        h('span', { className: 'text-gray-500 text-sm ml-3' },
+                                                            item.boxCount + ' boxes, ' + item.totalQty + ' units'
+                                                        )
+                                                    )
+                                                ),
+                                                h('div', { className: 'ml-8 mt-1 text-xs text-gray-400' },
+                                                    'Boxes: ' + koliNos
+                                                )
+                                            );
+                                        })
+                                    ),
+
+                                    // Step 2 & Mapping Buttons
+                                    h('div', { className: 'flex gap-2 mb-2' },
+                                        h('button', {
+                                            onClick: () => downloadStep2XLSX(selectedItems, 'Step2_' + cat.key + '.xlsx', cat.pack),
+                                            disabled: selectedCount === 0,
+                                            className: 'flex-1 px-4 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-semibold disabled:opacity-50 disabled:cursor-not-allowed'
+                                        }, 'Download STEP 2 (' + selectedCount + ' SKU)'),
+                                        h('button', {
+                                            onClick: () => downloadBoxMapping(selectedItems, 'Mapping_' + cat.key + '.xlsx', cat.pack),
+                                            disabled: selectedCount === 0,
+                                            className: 'flex-1 px-4 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-semibold disabled:opacity-50 disabled:cursor-not-allowed'
+                                        }, 'Download Mapping')
+                                    ),
+                                    // Mark as Sent Button
+                                    h('button', {
+                                        onClick: async () => {
+                                            const count = await markBoxesAsSent(selectedItems);
+                                            alert(count + ' boxes marked as sent!');
+                                        },
+                                        disabled: selectedCount === 0,
+                                        className: 'w-full px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed'
+                                    }, '✓ Mark Selected as Sent (' + selectedItems.reduce((sum, item) => sum + item.boxCount, 0) + ' boxes)')
+                                )
+                            );
+                        })
+                    )
+                )
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('app'));
+        root.render(React.createElement(App));
+    </script>
+</body>
+</html>
