@@ -729,8 +729,8 @@
                 setSelectedSkus(prev => ({
                     ...prev,
                     [categoryKey]: {
-                        ...prev[categoryKey],
-                        [sku]: !prev[categoryKey][sku]
+                        ...(prev[categoryKey] || {}),
+                        [sku]: !(prev[categoryKey] || {})[sku]
                     }
                 }));
             };
