@@ -598,12 +598,32 @@
                     unitsMatch: totalUnitsInGemi === totalUnitsProcessed
                 };
 
+                // Enriched gemi: tüm satırlar (sent box filtresi YOK), referans DB'den SKU eklenmiş
+                const enrichedGemi = gemiData.map((box, idx) => {
+                    const fnsku = (box.fnsku || '').trim();
+                    const ref = fnSkuMap[fnsku];
+                    return {
+                        koli_no: box.koli_no || box.box_no || ('Row-' + (idx + 2)),
+                        name: box.name || '',
+                        sku: ref ? ref.sku : '',
+                        fnsku: fnsku,
+                        quantity: parseInt(box.quantity) || 0,
+                        weight: box.weight || '',
+                        length: box.length || '',
+                        width: box.width || '',
+                        height: box.height || ''
+                    };
+                });
+                const enrichedMissingSku = enrichedGemi.filter(r => r.fnsku && !r.sku).length;
+
                 return {
                     categories,
                     verification,
                     missingFnskus: Array.from(missingFnskus),
                     skippedBoxes,
                     duplicateKoliNos,
+                    enrichedGemi,
+                    enrichedMissingSku,
                 };
             };
 
@@ -857,6 +877,28 @@
                     const wb = window.XLSX.utils.book_new();
                     window.XLSX.utils.book_append_sheet(wb, ws, 'Mapping');
                     window.XLSX.writeFile(wb, filename);
+                } catch (error) {
+                    alert('Download error: ' + error.message);
+                }
+            };
+
+            const downloadEnrichedGemi = () => {
+                if (!xlsxReady || !result || !result.enrichedGemi) return;
+                try {
+                    const ws_data = [
+                        ['koli_no', 'name', 'sku', 'fnsku', 'quantity', 'weight', 'length', 'width', 'height']
+                    ];
+                    result.enrichedGemi.forEach(r => {
+                        ws_data.push([
+                            r.koli_no, r.name, r.sku, r.fnsku, r.quantity,
+                            r.weight, r.length, r.width, r.height
+                        ]);
+                    });
+                    const ws = window.XLSX.utils.aoa_to_sheet(ws_data);
+                    const wb = window.XLSX.utils.book_new();
+                    window.XLSX.utils.book_append_sheet(wb, ws, 'Shipmate');
+                    const baseName = (gemiFile && gemiFile.name) ? gemiFile.name.replace(/\.xlsx?$/i, '') : 'Gemi';
+                    window.XLSX.writeFile(wb, baseName + '_enriched.xlsx');
                 } catch (error) {
                     alert('Download error: ' + error.message);
                 }
@@ -1136,6 +1178,25 @@
                     // Verification Box
                     h('div', { className: 'bg-white rounded-xl shadow-xl p-6 mb-6' },
                         h('h2', { className: 'text-2xl font-bold mb-4 text-center' }, 'Analysis Results'),
+
+                        // Enriched Gemi Export
+                        result.enrichedGemi && result.enrichedGemi.length > 0 && h('div', {
+                            className: 'mb-6 p-4 rounded-lg bg-blue-50 border-2 border-blue-300 flex items-center justify-between'
+                        },
+                            h('div', null,
+                                h('div', { className: 'font-bold text-blue-900' }, 'Enriched Gemi Excel'),
+                                h('div', { className: 'text-sm text-blue-700' },
+                                    'Tüm ' + result.enrichedGemi.length + ' satır + SKU kolonu' +
+                                    (result.enrichedMissingSku > 0
+                                        ? ' (' + result.enrichedMissingSku + ' satırda SKU bulunamadı — referansta yok)'
+                                        : '')
+                                )
+                            ),
+                            h('button', {
+                                onClick: downloadEnrichedGemi,
+                                className: 'px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold'
+                            }, 'Download Enriched Gemi')
+                        ),
 
                         result.verification && h('div', {
                             className: 'mb-6 p-4 rounded-lg ' + (result.verification.boxesMatch && result.verification.unitsMatch ? 'bg-green-50 border-2 border-green-500' : 'bg-red-50 border-2 border-red-500')
