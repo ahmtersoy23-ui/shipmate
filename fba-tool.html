@@ -69,6 +69,9 @@
             const [batchSize, setBatchSize] = useState(10);
             const [splitEnabled, setSplitEnabled] = useState({});
 
+            // Box dimensions panel expand/collapse state (per card group)
+            const [dimsExpanded, setDimsExpanded] = useState({});
+
             // Load reference DB and sent boxes from API on mount
             useEffect(() => {
                 if (window.XLSX) {
@@ -722,6 +725,21 @@
                         alert('Copy error: ' + err2.message);
                     });
                 });
+            };
+
+            // Copy a single box's dimensions to clipboard (tab-separated: Lb, W, L, H)
+            const copyBoxDims = (b) => {
+                const text = [b.weight, b.width, b.length, b.height].join('\t');
+                navigator.clipboard.writeText(text).catch(() => {});
+            };
+
+            // Copy all boxes as TSV (paste-able into Excel)
+            const copyAllBoxDims = (boxes) => {
+                const header = 'Box\tSKU\tUnits\tWeight (lb)\tWidth (in)\tLength (in)\tHeight (in)';
+                const rows = boxes.map(b =>
+                    [b.koli_no, b.sku, b.quantity, b.weight, b.width, b.length, b.height].join('\t')
+                );
+                navigator.clipboard.writeText([header, ...rows].join('\n')).catch(() => {});
             };
 
             const downloadStep1XLSX = (items, filename, categoryKey) => {
@@ -1535,6 +1553,66 @@
                                                     );
                                                 })
                                             ),
+
+                                            // Box dimensions panel — for manual entry into Amazon form
+                                            (() => {
+                                                const allBoxes = selectedItems.flatMap(item =>
+                                                    item.boxes.map(b => Object.assign({}, b, { sku: item.sku }))
+                                                );
+                                                if (allBoxes.length === 0) return null;
+                                                const totalLb = allBoxes.reduce((s, b) => s + parseFloat(b.weight || 0), 0);
+                                                const isExpanded = dimsExpanded[cgKey] !== undefined
+                                                    ? dimsExpanded[cgKey]
+                                                    : allBoxes.length <= 8;
+                                                return h('div', { className: 'bg-amber-50 border border-amber-200 rounded-lg mb-3 overflow-hidden' },
+                                                    h('div', { className: 'flex items-center justify-between px-4 py-2 bg-amber-100' },
+                                                        h('button', {
+                                                            onClick: () => setDimsExpanded(prev => Object.assign({}, prev, { [cgKey]: !isExpanded })),
+                                                            className: 'flex-1 text-left font-semibold text-amber-900 text-sm hover:underline'
+                                                        },
+                                                            (isExpanded ? '▼' : '▶') + ' 📦 Box dimensions (' + allBoxes.length + ')' +
+                                                            ' — Total: ' + totalLb.toFixed(1) + ' lb'
+                                                        ),
+                                                        h('button', {
+                                                            onClick: () => copyAllBoxDims(allBoxes),
+                                                            className: 'text-xs px-2 py-1 bg-white border border-amber-300 rounded hover:bg-amber-50 text-amber-900 font-semibold',
+                                                            title: 'Tümünü TSV olarak panoya kopyala'
+                                                        }, '📋 Copy all')
+                                                    ),
+                                                    isExpanded && h('div', { className: 'bg-white overflow-x-auto' },
+                                                        h('table', { className: 'w-full text-xs' },
+                                                            h('thead', { className: 'bg-amber-50 border-b border-amber-200' },
+                                                                h('tr', null,
+                                                                    h('th', { className: 'text-left px-3 py-2 font-semibold' }, 'Box'),
+                                                                    h('th', { className: 'text-left px-3 py-2 font-semibold' }, 'SKU'),
+                                                                    h('th', { className: 'text-right px-3 py-2 font-semibold' }, 'Units'),
+                                                                    h('th', { className: 'text-right px-3 py-2 font-semibold' }, 'Lb'),
+                                                                    h('th', { className: 'text-right px-3 py-2 font-semibold' }, 'W × L × H (in)'),
+                                                                    h('th', { className: 'px-2 py-2' }, '')
+                                                                )
+                                                            ),
+                                                            h('tbody', null,
+                                                                allBoxes.map((b, idx) =>
+                                                                    h('tr', { key: b.koli_no, className: idx % 2 === 0 ? 'bg-white' : 'bg-gray-50' },
+                                                                        h('td', { className: 'px-3 py-1.5 font-mono' }, b.koli_no),
+                                                                        h('td', { className: 'px-3 py-1.5 font-mono text-blue-600' }, b.sku),
+                                                                        h('td', { className: 'px-3 py-1.5 text-right' }, b.quantity),
+                                                                        h('td', { className: 'px-3 py-1.5 text-right font-semibold' }, b.weight),
+                                                                        h('td', { className: 'px-3 py-1.5 text-right font-mono' }, b.width + ' × ' + b.length + ' × ' + b.height),
+                                                                        h('td', { className: 'px-2 py-1.5' },
+                                                                            h('button', {
+                                                                                onClick: () => copyBoxDims(b),
+                                                                                title: 'Kopyala: lb⇥W⇥L⇥H',
+                                                                                className: 'text-xs px-2 py-0.5 rounded hover:bg-amber-200'
+                                                                            }, '📋')
+                                                                        )
+                                                                    )
+                                                                )
+                                                            )
+                                                        )
+                                                    )
+                                                );
+                                            })(),
 
                                             h('div', { className: 'flex gap-2 mb-2' },
                                                 h('button', {
